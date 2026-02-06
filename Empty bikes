@@ -1,0 +1,319 @@
+#empty bike model
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ---------------------------------------------------------
+# Load and combine data
+# ---------------------------------------------------------
+files = [
+    "BelfastBikeApr21.xlsx", "BelfastBikeAug21.xlsx", "BelfastBikeJul21.xlsx",
+    "BelfastBikeJun21.xlsx", "BelfastBikeMay21.xlsx", "BelfastBikeOct21.xlsx",
+    "BelfastBikeSep21.xlsx"
+]
+
+dfs = [pd.read_excel(f) for f in files]
+combined = pd.concat(dfs)
+
+# Compute average start/end probabilities
+avg_start = combined.groupby("Station_id")["Start rate (hr^(-1))"].mean()
+avg_end   = combined.groupby("Station_id")["p_(trip end)"].mean()
+
+P_start0 = avg_start.values
+lam = avg_start.values / 60
+P_start = lam / lam.sum()
+
+P_end2   = avg_end.values
+
+#model as poisson
+#lambda rate
+
+# Normalise
+#P_start = P_start2 / P_start2.sum()
+P_end   = P_end2 / P_end2.sum()
+
+num_stations = len(P_start)
+
+num_runs = 5
+num_steps = 43800
+
+station_id = 30
+
+# ----------------------
+# Improved MoveBike
+# ---------------------------------------------------------
+def MoveBike(state, empty_count, full_count, origin, dest, max_capacity):
+    if state[origin] == 0:
+        empty_count[origin] += 1
+        return state, empty_count, full_count
+
+    if state[dest] == max_capacity[dest]:
+        full_count[dest] += 1
+        return state, empty_count, full_count
+
+    state[origin] -= 1
+    state[dest]   += 1
+    return state, empty_count, full_count
+
+# ---------------------------------------------------------
+# Improved Step
+# ---------------------------------------------------------
+def Step(state, empty_count, full_count, P_from, P_to,
+         max_moves_per_minute, max_capacity):
+
+    num_stations = len(state)
+    num_moves = np.random.randint(0, max_moves_per_minute + 1)
+
+    # Pre-sample all origins and destinations
+    origins = np.random.choice(num_stations, size=num_moves, p=P_from)
+    dests   = np.random.choice(num_stations, size=num_moves, p=P_to)
+
+    for origin, dest in zip(origins, dests):
+
+        # Skip self-trips
+        if origin == dest:
+            continue
+
+        state, empty_count, full_count = MoveBike(
+            state, empty_count, full_count, origin, dest, max_capacity
+        )
+
+    return state, empty_count, full_count
+
+#SINGLE ONE Bikes and stands are set for everyone
+
+AllRuns = np.zeros((num_runs, num_steps, num_stations))
+
+max_capacity = np.full(num_stations, 20)
+
+for run in range(num_runs):
+
+    # Reset system each run
+    Station_bikes = np.full(num_stations, 10)
+    Station_empty = np.zeros(num_stations)
+    Stand_capacity = np.zeros(num_stations)
+
+    Results = np.zeros((num_steps, num_stations))
+
+    for i in range(num_steps):
+        Station_bikes, Station_empty, Stand_capacity = Step(
+            Station_bikes, Station_empty, Stand_capacity, P_start, P_end,
+            max_moves_per_minute=5, max_capacity=max_capacity
+        )
+        Results[i, :] = Station_empty
+
+    AllRuns[run, :, :] = Results
+
+# Average across runs
+#AverageResults = AllRuns.mean(axis=0)
+
+AverageResults_before = AllRuns.mean(axis=0)
+
+
+# Compute growth for each station
+growth = AverageResults_before[-1, :] - AverageResults_before[0, :]
+# Pick top 5 stations
+
+top_k = 5
+top_stations = np.argsort(growth)[-top_k:]
+
+
+
+
+# Choose 5 distinct colours
+forced_colors = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00"]
+
+# Map each top station to a colour
+color_map = {station: forced_colors[i] for i, station in enumerate(top_stations)}
+
+plt.figure(figsize=(10, 5))
+
+for s in range(num_stations):
+    if s in top_stations:
+        plt.plot(
+            AverageResults_before[:, s],
+            label=f"Station {s}",
+            color=color_map[s],   # <--- forced colour
+            linewidth=1
+        )
+    else:
+        plt.plot(AverageResults_before[:, s], alpha=0.3, color="gray")
+
+
+
+
+plt.ylabel("Average number of times station is empty")
+plt.xlabel("Time (minutes)")
+plt.title(f"Empty Events Over Time")
+plt.legend(title="Top Emptying Stations")
+#plt.legend()
+plt.show()
+
+plt.figure(figsize=(10, 5))
+plt.plot(AverageResults_before[:, station_id], linewidth=1, color="#ff7f00")
+plt.title(f"Empty Events Over Time – Station {station_id}")
+plt.xlabel("Time (minutes)")
+plt.ylabel("Average number of times station is empty")
+plt.show()
+
+#DISTRIBUTION - Bikes and stands are distributed by busyness
+
+
+# ---------------------------------------------------------
+# Simulation parameters
+# ---------------------------------------------------------
+
+AllRuns = np.zeros((num_runs, num_steps, num_stations))
+
+# ---------------------------------------------------------
+# Run simulation
+# ---------------------------------------------------------
+for run in range(num_runs):
+
+
+
+    START_THRESHOLD = np.percentile(P_start0, 75)
+    END_THRESHOLD   = np.percentile(P_end2, 75)
+
+    initial_bikes = np.where(P_start0 > START_THRESHOLD, 15, 10)
+    MAX_CAPACITY  = np.where(P_end2   > END_THRESHOLD, 30, 20)
+
+
+    #print(initial_bikes)
+
+    Station_bikes = initial_bikes.astype(int).copy()
+    Station_empty = np.zeros(num_stations)
+    Stand_capacity = np.zeros(num_stations)
+
+    Results = np.zeros((num_steps, num_stations))
+
+    for t in range(num_steps):
+        Station_bikes, Station_empty, Stand_capacity = Step(
+            Station_bikes, Station_empty, Stand_capacity,
+            P_start, P_end, max_moves_per_minute=5,
+            max_capacity=MAX_CAPACITY
+        )
+        Results[t, :] = Station_empty
+        #print(Stand_capacity)
+
+    AllRuns[run, :, :] = Results
+
+
+
+# ---------------------------------------------------------
+# Average across runs
+# ---------------------------------------------------------
+AverageResults_after = AllRuns.mean(axis=0)
+
+# Compute growth for each station
+growth = AverageResults_after[-1, :] - AverageResults_after[0, :]
+
+# Pick top 5 stations
+top_k = 5
+top_stations1 = np.argsort(growth)[-top_k:]
+
+# ---------------------------------------------------------
+# Plot results
+# ---------------------------------------------------------
+# Choose 5 distinct colours
+forced_colors1 = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00"]
+
+# Map each top station to a colour
+color_map = {station: forced_colors1[i] for i, station in enumerate(top_stations)}
+
+plt.figure(figsize=(10, 5))
+
+for s in range(num_stations):
+    if s in top_stations:
+        plt.plot(
+            AverageResults_after[:, s],
+            label=f"Station {s}",
+            color=color_map[s],   # <--- forced colour
+            linewidth=1
+        )
+    else:
+        plt.plot(AverageResults_after[:, s], alpha=0.3, color="gray")
+
+
+
+
+plt.ylabel("Average number of times station is empty")
+plt.xlabel("Time (minutes)")
+plt.title(f"Empty Events Over Time with Redistribution of bikes")
+plt.legend(title="Top Emptying Stations")
+plt.show()
+
+plt.figure(figsize=(10, 5))
+plt.plot(AverageResults_after[:, station_id], linewidth=1, color="#ff7f00")
+plt.title(f"Redistributed Empty Events Over Time – Station {station_id}")
+plt.xlabel("Time (minutes)")
+plt.ylabel("Average number of times station is empty")
+plt.show()
+
+
+
+# Choose stations to compare
+station_IDs = np.concatenate([top_stations, top_stations1])
+station_IDs = np.array(list(dict.fromkeys(station_IDs)))  # remove duplicates
+
+before = AverageResults_before[-1, station_IDs]
+after  = AverageResults_after[-1, station_IDs]
+percent_change = ((after - before) / before) * 100
+
+labels = [f"Station {s}" for s in station_IDs]
+x = np.arange(len(station_IDs))
+width = 0.35
+
+plt.figure(figsize=(10, 6))
+bars1 = plt.bar(x - width/2, before, width, label="Before", color="#006CA5")
+bars2 = plt.bar(x + width/2, after,  width, label="After",  color="#46926c")
+
+# ---- Add numeric labels ----
+for bar in bars1:
+    h = bar.get_height()
+    plt.text(bar.get_x() + bar.get_width()/2, h, f"{h:.1f}",
+             ha='center', va='bottom', fontsize=7)
+
+for bar in bars2:
+    h = bar.get_height()
+    plt.text(bar.get_x() + bar.get_width()/2, h, f"{h:.1f}",
+             ha='center', va='bottom', fontsize=7)
+
+# ---- Add percentage change at the bottom of the RIGHT bar ----
+for i, bar in enumerate(bars2):
+    right_x = bar.get_x() + bar.get_width()/2
+
+    plt.text(
+        right_x,
+        1,   # always inside the graph
+        f"{percent_change[i]:.1f}%",
+        ha='center',
+        va='bottom',
+        fontsize=9,
+        color="black"
+    )
+
+
+
+
+plt.xticks(x, labels, rotation=90, fontsize=7)
+plt.ylabel("Empty Events")
+plt.title("Before vs After Empty Events (with % Change)")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# ---------------------------------------------------------
+# Bar chart for number of journeys taken each month
+# ---------------------------------------------------------
+
+x = np.array(["April", "May", "June", "July", "August", "September", "October"])
+y = np.array([30540,20457,26068, 25232,23829,22960,18681])
+
+plt.bar(x,y)
+plt.show()
+
+
+
+
